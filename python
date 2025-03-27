@@ -1,0 +1,342 @@
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+import asyncio
+import logging
+from datetime import datetime
+
+# Bot tokenini o'rnating
+API_TOKEN = '7555417171:AAF4LbKyDwBr3AUVuDMsgVkk2peMUpPkYAo'
+
+# Logging sozlamalari
+logging.basicConfig(level=logging.INFO)
+
+# Bot va Dispatcher yaratish
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+
+# FSM (Finite State Machine) holatlarini aniqlash
+class OrderForm(StatesGroup):
+    full_name = State()
+    passport_type = State()
+    passport_series_number = State()  # Passport seriya va raqam
+    passport_photo = State()
+    phone_number = State()
+    location = State()
+    tariff_choice = State()
+    confirm = State()
+
+# Admin statistikasi uchun ma'lumotlar
+orders_statistics = {}
+ADMIN_CHAT_ID = '7977885078'  # Admin chat ID ni o'rnating
+WORKER_ROLE_APPROVED = False  # Ishchi lavozimiga ruxsat berilganligi
+
+# Buyurtma tarixini saqlash uchun ma'lumotlar
+orders_history = {}
+
+# Boshlash komandasi
+@dp.message(Command("start"))
+async def start(message: Message):
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Tariflar haqida ma'lumot")],
+            [KeyboardButton(text="Buyurtma berish")],
+            [KeyboardButton(text="Buyurtmalar tarixi")]  # Yangi tugma
+        ],
+        resize_keyboard=True
+    )
+    await message.answer("Assalomu alaykum! Sarkor Telecom botiga xush kelibsiz.", reply_markup=keyboard)
+
+# Tariflar haqida ma'lumot
+@dp.message(F.text == "Tariflar haqida ma'lumot")
+async def show_tariffs(message: Message):
+    tariffs = [
+        "1. COMFORT\nNarx: 154,000 so'm/oy\nTezlik:60 Mbit/s\nTV kanallar:90ta",
+        "2. OPTIMA\nNarx: 174,000 so'm/oy\nTezlik: 100 Mbit/s\nTV kanallar:120ta",
+        "3. Stream\nNarx: 244,000 so'm/oy\nTezlik: 250 Mbit/s\nTV kanallar:120ta",
+        "4. VIP\nNarx: 444,000 so'm/oy\nTezlik:500 Mbit/s\nTV kanallar:145ta",
+    ]
+    response = "\n".join(tariffs)
+    await message.answer(f"Tariflar haqida ma'lumot:\n{response}")
+
+# Buyurtma berish jarayoni boshlanishi
+@dp.message(F.text == "Buyurtma berish")
+async def start_order(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if WORKER_ROLE_APPROVED or user_id not in orders_statistics:
+        orders_statistics[user_id] = {"orders_count": 0}
+    if WORKER_ROLE_APPROVED or orders_statistics[user_id]["orders_count"] < 1:
+        await state.set_state(OrderForm.full_name)
+        await message.answer("Iltimos, ism va familiyangizni kiriting:")
+    else:
+        await message.answer("Siz jismoniy shaxs sifatida bir buyurtma berishingiz mumkin.")
+
+# Ism va familiya qabul qilish
+@dp.message(OrderForm.full_name)
+async def get_full_name(message: Message, state: FSMContext):
+    full_name = message.text.strip()
+    if not full_name.replace(' ', '').isalpha():  # Agar matnda faqat harflar bo'lmasa
+        await message.answer("Iltimos, ism va familiyangizni harflar bilan kiriting!")
+        return
+    await state.update_data(full_name=full_name)
+    await state.set_state(OrderForm.passport_type)
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="ID karta"), KeyboardButton(text="Pasport")],
+        ],
+        resize_keyboard=True
+    )
+    await message.answer("Passport turini tanlang:", reply_markup=keyboard)
+
+# Passport turi tanlash
+@dp.message(OrderForm.passport_type)
+async def get_passport_type(message: Message, state: FSMContext):
+    passport_type = message.text.strip()
+    if passport_type not in ["ID karta", "Pasport"]:
+        await message.answer("Iltimos, \"ID karta\" yoki \"Pasport\" ni tanlang!")
+        return
+    await state.update_data(passport_type=passport_type)
+    await state.set_state(OrderForm.passport_series_number)
+    await message.answer("Passport seriya va raqamini kiriting (misol: AA1234567):")
+
+# Passport seriya va raqamini qabul qilish
+@dp.message(OrderForm.passport_series_number)
+async def get_passport_series_number(message: Message, state: FSMContext):
+    passport_series_number = message.text.strip()
+    # Passport seriya va raqamini tekshirish (misol uchun, uzunligi 9 ta belgi bo'lishi kerak)
+    if len(passport_series_number) != 9 or not passport_series_number[:2].isalpha() or not passport_series_number[2:].isdigit():
+        await message.answer("Iltimos, to'liq ma'lumot kiriting! Misol: AA1234567")
+        return
+    await state.update_data(passport_series_number=passport_series_number)
+    data = await state.get_data()
+    if data["passport_type"] == "ID karta":
+        await message.answer("ID kartangizning oldi va orqa tomonining rasmini yuboring:")
+    elif data["passport_type"] == "Pasport":
+        await message.answer("Pasportingizning faqat oldi tomonining rasmini yuboring:")
+    await state.set_state(OrderForm.passport_photo)
+
+# Passport rasmini qabul qilish
+@dp.message(OrderForm.passport_photo)
+async def get_passport_photo(message: Message, state: FSMContext):
+    if not message.photo:
+        await message.answer("Iltimos, rasm formatida yuboring!")
+        return
+    await state.update_data(passport_photo=message.photo[-1].file_id)
+    await state.set_state(OrderForm.phone_number)
+    # Telefon raqamini so'rash uchun tugma
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Telefon yuborish", request_contact=True)],
+        ],
+        resize_keyboard=True
+    )
+    await message.answer("Telefon raqamingizni yuborish uchun 'Telefon yuborish' tugmasini bosing:", reply_markup=keyboard)
+
+# Foydalanuvchi kontaktini avtomatik qabul qilish
+@dp.message(F.contact, OrderForm.phone_number)
+async def get_contact(message: Message, state: FSMContext):
+    if message.contact:
+        phone_number = message.contact.phone_number
+        await state.update_data(phone_number=phone_number)
+        await state.set_state(OrderForm.location)
+        # Lokatsiya yuborish tugmasi
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="Lokatsiyani yuborish", request_location=True)],
+            ],
+            resize_keyboard=True
+        )
+        await message.answer("Rahmat! Endi Telegram orqali lokatsiyangizni yuboring:", reply_markup=keyboard)
+    else:
+        await message.answer("Kontaktingizni yuborishda xatolik yuz berdi. Iltimos, qayta urinib ko'ring!")
+
+# Lokatsiyani qabul qilish
+@dp.message(OrderForm.location)
+async def get_location(message: Message, state: FSMContext):
+    if not message.location:
+        await message.answer("Iltimos, lokatsiyani yuboring!")
+        return
+    await state.update_data(location=f"{message.location.latitude}, {message.location.longitude}")
+    tariffs = [
+        ("COMFORT", 154000),
+        ("OPTIMA", 174000),
+        ("STREAM", 244000),
+        ("VIP", 444000),
+    ]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{name} - {price} so'm", callback_data=f"tariff_{name}")]
+        for name, price in tariffs
+    ])
+    await state.set_state(OrderForm.tariff_choice)
+    await message.answer("Tarifni tanlang:", reply_markup=keyboard)
+
+# Tarifni tanlash
+@dp.callback_query(OrderForm.tariff_choice)
+async def choose_tariff(callback: CallbackQuery, state: FSMContext):
+    tariff_name = callback.data.split("_")[1]
+    await state.update_data(tariff_name=tariff_name)
+    await state.set_state(OrderForm.confirm)
+    data = await state.get_data()
+    confirmation_message = (
+        f"Siz quyidagi ma'lumotlarni kiritdingiz:\n"
+        f"Ism va familiya: {data['full_name']}\n"
+        f"Passport turi: {data['passport_type']}\n"
+        f"Passport seriya va raqam: {data['passport_series_number']}\n"
+        f"Telefon raqami: {data['phone_number']}\n"
+        f"Lokatsiya: {data['location']}\n"
+        f"Tanlangan tarif: {tariff_name}\n"
+        f"Ma'lumotlaringizni tasdiqlaysizmi?"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Tasdiqlash ✅", callback_data="confirm_yes")],
+        [InlineKeyboardButton(text="Bekor qilish ❌", callback_data="confirm_no")]
+    ])
+    await callback.message.answer(confirmation_message, reply_markup=keyboard)
+
+# Buyurtmani tasdiqlash (buyurtma tarixiga qo'shish)
+@dp.callback_query(OrderForm.confirm)
+async def confirm_order(callback: CallbackQuery, state: FSMContext):
+    if callback.data == "confirm_yes":
+        data = await state.get_data()
+        user_id = callback.from_user.id
+        admin_message = (
+            f"Yangi buyurtma:\n"
+            f"Ism va familiya: {data['full_name']}\n"
+            f"Passport turi: {data['passport_type']}\n"
+            f"Passport seriya va raqam: {data['passport_series_number']}\n"
+            f"Telefon raqami: {data['phone_number']}\n"
+            f"Lokatsiya: {data['location']}\n"
+            f"Tanlangan tarif: {data['tariff_name']}"
+        )
+        
+        # Passport rasmini adminga yuborish
+        passport_photo_file_id = data.get("passport_photo")
+        if passport_photo_file_id:
+            await bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=passport_photo_file_id, caption=admin_message)
+        else:
+            await bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_message)
+
+        # Foydalanuvchi uchun xabar va tugma
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Bosh sahifaga qaytish", callback_data="back_to_main_menu")]
+        ])
+        await callback.message.answer("Buyurtmangiz qabul qilindi! Tez orada siz bilan bog'lanamiz.", reply_markup=keyboard)
+
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        order_data = {
+            "date": current_time,
+            "full_name": data["full_name"],
+            "passport_type": data["passport_type"],
+            "passport_series_number": data["passport_series_number"],
+            "phone_number": data["phone_number"],
+            "location": data["location"],
+            "tariff_name": data["tariff_name"]
+        }
+        if user_id not in orders_history:
+            orders_history[user_id] = []
+        orders_history[user_id].append(order_data)
+        if user_id in orders_statistics:
+            orders_statistics[user_id]["orders_count"] += 1
+        else:
+            orders_statistics[user_id] = {"orders_count": 1}
+    else:
+        await callback.message.answer("Buyurtma bekor qilindi.")
+    await state.clear()
+
+# Bosh sahifaga qaytish
+@dp.callback_query(F.data == "back_to_main_menu")
+async def back_to_main_menu(callback: CallbackQuery, state: FSMContext):
+    # Holatni tozalash
+    await state.clear()
+    # Bosh sahifa tugmalari
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Tariflar haqida ma'lumot")],
+            [KeyboardButton(text="Buyurtma berish")],
+            [KeyboardButton(text="Buyurtmalar tarixi")]
+        ],
+        resize_keyboard=True
+    )
+    await callback.message.answer("Bosh sahifaga xush kelibsiz!", reply_markup=keyboard)
+    await callback.answer()  # Callback queryga javob berish
+
+# Buyurtmalar tarixini ko'rish (Bekor qilish tugmasi qo'shilgan)
+@dp.message(F.text == "Buyurtmalar tarixi")
+async def show_order_history(message: Message, state: FSMContext):
+    # Joriy holatni tozalash
+    await state.clear()
+    user_id = message.from_user.id
+    if user_id in orders_history and orders_history[user_id]:
+        history_message = "Sizning buyurtmalar tarixingiz:\n"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+        for idx, order in enumerate(orders_history[user_id], start=1):
+            history_message += (
+                f"{idx}. Buyurtma sanasi: {order['date']}\n"
+                f"   Ism va familiya: {order['full_name']}\n"
+                f"   Passport turi: {order['passport_type']}\n"
+                f"   Passport seriya va raqam: {order['passport_series_number']}\n"
+                f"   Telefon raqami: {order['phone_number']}\n"
+                f"   Lokatsiya: {order['location']}\n"
+                f"   Tanlangan tarif: {order['tariff_name']}\n"
+            )
+            # Har bir buyurtma uchun "Bekor qilish" tugmasi
+            keyboard.inline_keyboard.append(
+                [InlineKeyboardButton(text=f"{idx}-buyurtmani bekor qilish", callback_data=f"cancel_order_{idx}")]
+            )
+        await message.answer(history_message, reply_markup=keyboard)
+    else:
+        await message.answer("Siz hali buyurtma bermagansiz.")
+
+# Buyurtmani bekor qilish
+@dp.callback_query(F.data.startswith("cancel_order_"))
+async def cancel_order(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    order_index = int(callback.data.split("_")[2]) - 1  # Buyurtma indeksi (0-based)
+    if user_id in orders_history and 0 <= order_index < len(orders_history[user_id]):
+        canceled_order = orders_history[user_id].pop(order_index)  # Buyurtmani tarixdan olib tashlash
+        # Admin uchun xabar
+        admin_message = (
+            f"Buyurtma bekor qilindi:\n"
+            f"Ism va familiya: {canceled_order['full_name']}\n"
+            f"Passport turi: {canceled_order['passport_type']}\n"
+            f"Passport seriya va raqam: {canceled_order['passport_series_number']}\n"
+            f"Telefon raqami: {canceled_order['phone_number']}\n"
+            f"Lokatsiya: {canceled_order['location']}\n"
+            f"Tanlangan tarif: {canceled_order['tariff_name']}"
+        )
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_message)
+        # Foydalanuvchi uchun xabar va tugma
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Bosh sahifaga qaytish", callback_data="back_to_main_menu")]
+        ])
+        await callback.message.answer("Buyurtma muvaffaqiyatli bekor qilindi!", reply_markup=keyboard)
+        # Statistikani yangilash
+        if user_id in orders_statistics:
+            orders_statistics[user_id]["orders_count"] -= 1  # Buyurtma sonini kamaytirish
+            if orders_statistics[user_id]["orders_count"] <= 0:
+                del orders_statistics[user_id]  # Agar buyurtmalar soni 0 bo'lsa, foydalanuvchi o'chiriladi
+        # Agar buyurtmalar tarixi bo'sh bo'lsa
+        if not orders_history[user_id]:
+            del orders_history[user_id]
+    else:
+        await callback.message.answer("Buyurtma topilmadi yoki allaqachon bekor qilingan.")
+
+# Statistika ko'rish
+@dp.message(Command("stats"))
+async def show_stats(message: Message):
+    if message.from_user.id == ADMIN_CHAT_ID:
+        stats_message = "Buyurtmalar statistikasi:\n"
+        for user_id, data in orders_statistics.items():
+            stats_message += f"Foydalanuvchi ID: {user_id}, Buyurtmalar soni: {data['orders_count']}\n"
+        await message.answer(stats_message)
+    else:
+        await message.answer("Bu komanda faqat admin uchun mavjud.")
+
+# Asosiy dastur
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
